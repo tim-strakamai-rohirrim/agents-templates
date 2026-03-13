@@ -4,7 +4,7 @@ Write a handoff message in this format:
 
 Handoff from **Frontend agent**
 
-`Goal:` Implemented [describe UI feature/bugfix] per `[FRONTEND]` items X–Y in `PRCR-1063-PLAN.md`.
+`Goal:` Implemented [describe UI feature/bugfix] per `[FRONTEND]` items X–Y in `PRCR-1229-PLAN.md`.
 
 `Changes:`
 
