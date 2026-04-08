@@ -9,8 +9,8 @@ Your job is to generate a clear, reviewer‑friendly Pull Request description.
 
 Context you can rely on:
 
-- `PRCR-1229-PLAN.md` for the original problem, scope, and checklist.
-- `PRCR-1229-contracts.md` for API/data contracts and notable changes.
+- `PRCR-1260-v2-PLAN.md` for the original problem, scope, and checklist.
+- `PRCR-1260-v2-contracts.md` for API/data contracts and notable changes.
 - The current Git diff (staged or between the feature branch and the target branch).
 - Recent handoff summaries from the Frontend, Backend/DB, and Testing/Reviewer agents (if provided).
 
@@ -65,7 +65,7 @@ Context you can rely on:
 - It mentions the most important files/areas touched without listing every minor change.
 - It notes any contract or DB changes that other services or teams must be aware of.
 - It clearly states how the changes were tested and how reviewers can verify them.
-- It does not mention `PRCR-1229-PLAN.md` or `PRCR-1229-contracts.md` or "phases" because those files are not tracked in Git.
+- It does not mention `PRCR-1260-v2-PLAN.md` or `PRCR-1260-v2-contracts.md` or "phases" because those files are not tracked in Git.
 
 Now:
 
