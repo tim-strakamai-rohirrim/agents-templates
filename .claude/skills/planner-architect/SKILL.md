@@ -105,6 +105,32 @@ verification:
 - Use consistent terminology across plan and contracts.
 - Reference exact file paths relative to the repo root.
 
+### PR size budget (Samwise ceiling)
+
+Each phase becomes one PR, and Samwise **escalates** any PR over **800
+substantive lines** or **25 substantive files** (`> ceiling → needs human
+review`). "Substantive" excludes docs, tests, snapshots, images, and
+`*.lock` files — those don't count toward the size math. Aim each phase
+**under** that ceiling so PRs stay auto-reviewable.
+
+Practically:
+
+- Estimate each phase's substantive line/file footprint from its `files` list
+  and step detail. If it's near or over the ceiling, look for a clean seam to
+  split on (e.g. entity+migration in one phase, service+controller in the
+  next; or one component per phase).
+- Prefer splits that follow a natural boundary — a layer, a feature slice, a
+  single component — so each PR still reads as a complete, self-contained unit.
+
+**Completeness and clarity win over the number.** Do not carve a coherent
+change into confusing fragments, split a file mid-logic, or ship a PR that
+can't stand on its own just to get under 800/25. If the smallest reviewable
+unit genuinely exceeds the ceiling, keep it whole and add a one-line
+`> Note: exceeds Samwise size ceiling (~N lines / M files); no clean split
+without splitting <thing> mid-change — expect ESCALATE.` under the phase
+goal, so the human reviewer knows the escalation is intentional, not an
+oversight.
+
 ## Step 3 — Write the contracts
 
 Create or update `<TICKET>-contracts.md` with this structure:
@@ -156,14 +182,16 @@ Present the plan and contracts. Wait for confirmation before finalizing. Iterate
 
 - Do **not** modify application code in this role — only edit `*-PLAN.md` and `*-contracts.md`.
 - Do not fabricate requirements. If unsure, add to "Open questions".
-- Keep phases small enough for a single PR each.
+- Keep phases small enough for a single PR each — aim under the Samwise
+  ceiling (800 substantive lines / 25 substantive files; see PR size budget),
+  but never at the cost of a phase that reads as incomplete or confusing.
 - Every file path in the plan must be a real path in the repo (verify by reading).
 
 ## Tech stack reference
 
 | Layer | Stack |
 |-------|-------|
-| Frontend | Angular 19, SCSS, Karma/Jasmine, Playwright E2E |
+| Frontend | Angular 20+ (signals, zoneless, resource()), SCSS, Karma/Jasmine, Playwright E2E |
 | Backend | NestJS, TypeScript, TypeORM, Jest |
 | Python | FastAPI, SQLAlchemy, Alembic |
 | Database | PostgreSQL + pgvector |

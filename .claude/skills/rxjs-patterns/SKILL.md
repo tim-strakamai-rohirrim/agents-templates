@@ -14,9 +14,26 @@ allowed-tools:
   - mcp__context7__query-docs
 ---
 
-# RxJS Patterns for Rohan UI
+# RxJS Patterns for Rohan UI (Angular 20+)
 
 Use context7 for latest RxJS patterns. See CLAUDE.md for Context7 usage.
+
+## When to reach for RxJS in Angular 20+
+
+Signals are the default for synchronous reactive state. Reach for RxJS when you have:
+
+- **Streaming/SSE/WebSockets** — inherently push-based with multiple emissions over time
+- **Complex async orchestration** — `switchMap`, `mergeMap`, `concatMap`, `forkJoin`, `combineLatest`
+- **Time-based operators** — `debounceTime`, `throttleTime`, `auditTime`
+- **Cancellation of in-flight requests** beyond what `resource()`'s `AbortSignal` provides
+- **`HttpClient`** still returns Observables — wrap with `toSignal()` or `rxResource()` for views
+
+For simple "fetch when input changes" patterns in v20+, prefer `resource()` / `httpResource()` /
+`rxResource()` over hand-rolled `BehaviorSubject` plumbing.
+
+> Note: `resource()` and `httpResource()` are marked experimental in the official Angular docs and
+> `rxResource()` stability is unclear — consider this when choosing for production; fall back to
+> `BehaviorSubject`/RxJS patterns if you need guaranteed API stability.
 
 ## Subscription Management (takeUntilDestroyed)
 
@@ -48,7 +65,7 @@ export class StateService {
   readonly data$ = this.dataSubject.asObservable();
   readonly loading$ = this.loadingSubject.asObservable();
 
-  // For Angular 16+ signals interop
+  // Signals interop (Angular 20+: prefer signals/resource() over Subjects for new code)
   readonly data = toSignal(this.data$);
   readonly loading = toSignal(this.loading$);
 }

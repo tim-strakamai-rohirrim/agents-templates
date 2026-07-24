@@ -7,7 +7,7 @@ description: >-
   bot comments appear. The PR stays in draft the entire time so the
   human gets the next look. Use when the user says "run AI review",
   "AI review cycle", "ready and review", or it is invoked by the
-  plan-orchestrator after a PR is created.
+  run-plan workflow after a PR is created.
 allowed-tools:
   - Read
   - Edit
@@ -26,8 +26,25 @@ The PR is never flipped to ready-for-review — bots are summoned via
 slash command (CodeRabbit) and reviewer request (Copilot), both of
 which work on drafts. The human always gets the next look.
 
-Designed to be invoked by the `plan-orchestrator` agent after PR
-creation, or manually by the user.
+Designed to be invoked by the run-plan workflow after PR creation, or
+manually by the user.
+
+## Execution contexts
+
+- **As a sub-agent of the run-plan workflow** (the normal case) — the
+  adaptive bash poll in Step 2a is fine; the agent's whole job is this
+  cycle. The workflow may run the cycle concurrently with later phases
+  implementing in the same repo — when the invoking prompt says so, do
+  all fix work in a dedicated nested-repo worktree (never switch
+  branches in the primary checkout) and remove it when the cycle ends.
+  Your final report is consumed programmatically — it must include
+  every commit SHA pushed during the cycle.
+- **From the main conversation** — do not busy-wait in the foreground.
+  Launch the whole cycle as a background agent
+  (`run_in_background: true`); the harness notifies on completion, so
+  there is nothing to poll. If for some reason the main loop drives the
+  wait itself, pace it with ScheduleWakeup at ~240–270s rather than
+  foreground sleeps.
 
 ## Inputs
 
@@ -209,11 +226,18 @@ if [ "$iteration" -gt 1 ] && [ -z "$LAST_PUSHED_COMMIT" ]; then
 fi
 ```
 
-#### 2c. Delegate fixes to a sub-agent
+#### 2c. Delegate fixes to a persistent fixer agent
 
-Launch a `general-purpose` Task sub-agent. Its job is to apply the same
-discipline as the `pr-review` skill, but only against the bot comments we
-just collected:
+**Round 1**: launch a `general-purpose` Task sub-agent with the prompt
+below. **Rounds 2+**: do not spawn a fresh agent — continue the round-1
+fixer via **SendMessage** with just the new batch of bot comments. The
+fixer keeps its context, so it remembers which comments it already
+pushed back on (and why) and won't re-litigate or re-fix them when a
+bot restates the same point. If SendMessage is unavailable in your
+context, fall back to a fresh agent and paste the previous round's
+summary (fixes, push-backs, reasons) into its prompt.
+
+Round-1 prompt:
 
 ```yaml
 Task tool call:
@@ -243,9 +267,24 @@ Task tool call:
        - Comments deemed nits / out-of-scope (count)
        - Verification result
        - Commit SHA pushed
+
+    This conversation continues across review rounds — later rounds
+    will send you new bot-comment batches via follow-up messages.
+    Apply the same process to each batch; never re-address a comment
+    you already fixed or pushed back on in a prior round.
 ```
 
-Wait for the sub-agent to return.
+Follow-up message for rounds 2+ (via SendMessage to the same agent):
+
+```
+Round {iteration}: new bot comments since the last batch (JSON below).
+Same process — triage, fix or push back, verify, commit and push,
+report counts and the commit SHA. Skip anything you already addressed.
+
+{new bot comments JSON}
+```
+
+Wait for the fixer to return.
 
 #### 2d. Update LAST_SEEN, record the round's commit, and loop
 
@@ -299,6 +338,12 @@ human reviewer can sanity-check the disagreement.}
 ### Next step
 
 PR is back in draft. Open {pr_url} and do the human pass.
+
+### Pushed commits
+
+{Every commit SHA pushed during the cycle, one per line. The run-plan
+workflow consumes this list to merge-propagate fixes into stacked
+downstream phase branches — never omit it, even when empty.}
 ```
 
 ## Error handling
@@ -328,7 +373,10 @@ PR is back in draft. Open {pr_url} and do the human pass.
   `user.type == "Bot"`.
 - **Never force-push**. The sub-agent should append commits, not rewrite
   history, so the PR review thread stays coherent.
-- **Always use a fresh sub-agent per round** so its context window stays
-  scoped to the bot comments it is fixing.
+- **Reuse the same fixer agent across rounds** (continue it via
+  SendMessage) so prior push-backs aren't re-litigated and prior fixes
+  aren't redone. Only fall back to a fresh agent — with the previous
+  round's summary pasted into its prompt — when SendMessage is not
+  available in the execution context.
 - **Only summon configured bots.** Default is CodeRabbit + Copilot; pass
   a different `bots` list to override.

@@ -1,8 +1,9 @@
 ---
 name: angular-design-patterns
 description: |
-  Modern Angular design patterns and simplification strategies. Reference for CDK overlays,
-  signals, state management, component architecture, and migration guidance.
+  Modern Angular 20+ design patterns and simplification strategies. Reference for CDK overlays,
+  signals (resource/linkedSignal/httpResource), zoneless change detection, state management,
+  component architecture, and migration guidance.
   Triggers on "design pattern", "simplify", "best practice", "refactor architecture".
 allowed-tools:
   - Read
@@ -13,9 +14,12 @@ allowed-tools:
   - WebSearch
 ---
 
-# Angular Design Patterns & Simplification Guide
+# Angular Design Patterns & Simplification Guide (Angular 20+)
 
-Deep-dive patterns beyond CLAUDE.md basics. Use context7 to verify current best practices.
+Deep-dive patterns beyond CLAUDE.md basics. **Target: Angular 20+** (signals stable, zoneless,
+resource/httpResource APIs, incremental hydration). Use context7 to verify current best practices.
+
+> rohan_ui runs Angular 20.3. All patterns here are available in the codebase today.
 
 ---
 
@@ -55,8 +59,26 @@ Deep-dive patterns beyond CLAUDE.md basics. Use context7 to verify current best 
 - **Never** use `effect()` to propagate state changes (causes ExpressionChanged errors, infinite loops)
 - Legitimate uses: logging/analytics, localStorage sync, third-party lib integration
 
-### linkedSignal() (Angular 19+)
+### linkedSignal() (stable in v19, recommended in v20+)
 - Like `computed()` but writable — use for prefilled-but-editable values
+- Prefer the `{ source, computation, equal? }` form for explicit reset semantics
+
+### Async data
+- Use `HttpClient` (returns Observables). Consume with `async` pipe in templates, or `toSignal()`
+  when the value is needed in the component class (e.g. as a `computed()` input).
+- `resource()` / `rxResource()` / `httpResource()` are experimental — do not use.
+
+### afterRenderEffect() (v20+)
+- Use instead of `afterNextRender` when the work itself depends on signals and should re-run on
+  signal changes after each render. Use `afterNextRender` for one-shot post-render work.
+
+### Zoneless Change Detection (stable in v20)
+- New apps should bootstrap with `provideZonelessChangeDetection()` and drop `zone.js` from
+  `polyfills`. CD is driven by signals, events, and async pipe — NOT zone patching.
+- Audit before going zoneless: `setTimeout`/`setInterval` callbacks that mutate state must wrap
+  writes in a signal, or call `ChangeDetectorRef.markForCheck()` explicitly.
+- Third-party libs that rely on zone.js (older charting libs, some Material animations on legacy
+  versions) must be tested — check context7 for compatibility.
 
 ### Service Encapsulation
 ```typescript
@@ -95,7 +117,27 @@ readonly items = this._items.asReadonly();
 
 ---
 
-## 5. Scrolling
+## 5. Templates & Control Flow (v20+)
+
+- Use built-in `@if` / `@for` / `@switch` exclusively. `*ngIf` / `*ngFor` / `*ngSwitch` are
+  deprecated — run `ng generate @angular/core:control-flow` on legacy files.
+- `@for` requires `track` — prefer a stable id over `$index`.
+- `@let` declarations let you alias expressions in templates without a wrapper component.
+- Self-closing tags are supported for components with no content: `<app-foo [x]="y" />`.
+- Untagged template literals (backticks) are usable in template expressions in v20+.
+
+## 6. Component Authoring (v20+)
+
+- **Standalone is the default.** `standalone: true` no longer needs to be specified; only set
+  `standalone: false` when intentionally registering with an NgModule (e.g. rohan_ui today).
+- Prefer `input()` / `input.required()` / `model()` / `output()` over `@Input` / `@Output`
+  decorators. Use `viewChild()` / `contentChild()` (signal queries) over `@ViewChild` /
+  `@ContentChild`.
+- Use `ChangeDetectionStrategy.OnPush` always. With zoneless, OnPush is implicit but keep it
+  explicit for clarity.
+- Host bindings: prefer the `host: { ... }` metadata block over `@HostBinding` / `@HostListener`.
+
+## 7. Scrolling
 
 ### Router-Level Scroll
 - Best approach for scroll-to-top: `scrollPositionRestoration: 'top'` in router config

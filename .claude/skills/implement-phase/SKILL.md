@@ -58,6 +58,23 @@ to create or switch to the phase branch.
 If the branch already exists and has commits, check it out and continue from
 where it left off (the phase may be partially implemented from a prior run).
 
+**If your invoking prompt says another agent holds this repo's primary
+checkout** (parallel phases or a concurrent AI review cycle), do not switch
+branches there. Create a dedicated worktree of the nested repo and do all
+work inside it:
+
+```bash
+cd {repo_path}
+git worktree add ../{repo-name}-{TICKET}-phase-{N} -b {user}/{ticket}/phase-{N} {base_ref}
+```
+
+For `rohan_api` worktrees, the gitignored `.env`, `.env.test`, and
+`scripts/add_user_local.sql` are missing — copy them from the primary before
+running verification (read
+`.claude/skills/copy-rohan-api-worktree-files/SKILL.md`). Leave the worktree
+in place when done (PR creation pushes from it) and include its path in your
+report.
+
 ### Step 5 — Read existing code
 
 Before writing any code, read every file listed in the phase's `files` array.
@@ -91,6 +108,10 @@ For each step:
 - Use Angular's `formatDate` for timestamp formatting.
 - Prefer private helper class functions when they exist and fit the use case.
 - Do not add narrating comments (no "// Import the module", "// Handle the error").
+- Do NOT reference the plan or contracts docs in code comments (no "// per PLAN.md
+  phase 3", "// see contracts"). The plan document is not generally accessible, so
+  such references are dead links to readers. Write comments that explain intent,
+  non-obvious decisions, and tricky logic on their own terms.
 - Run the linter after substantive edits to catch issues early.
 
 ### Step 7 — Verify

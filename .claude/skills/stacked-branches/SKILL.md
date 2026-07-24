@@ -2,9 +2,10 @@
 name: stacked-branches
 description: >-
   Manage stacked git branches for phased implementation plans. Create phase
-  branches, check stack status, and rebase downstream phases. Use when the user
-  says "create phase branch", "start phase", "stack status", "rebase stack",
-  or when the implement-phase skill needs to set up a branch.
+  branches, check stack status, and propagate changes downstream. Use when the
+  user says "create phase branch", "start phase", "stack status", or when the
+  implement-phase skill needs to set up a branch. For bringing an already-pushed
+  stack (open PRs) up to date with main, use the rebase-stacked-prs skill.
 ---
 
 # Stacked Branches
@@ -96,28 +97,39 @@ Before any operation, locate the plan document:
    3     | tim/PRCR-1260/phase-3         | not created     | -       | phase-2
    ```
 
-### 3. Rebase downstream phases
+### 3. Propagate changes downstream
 
 **Trigger**: "rebase stack", "rebase downstream", "update stack after phase N changed".
 
-This is needed when you amend or add commits to an earlier phase and need to update all phases that stack on top of it.
+This is needed when you add commits to an earlier phase (or to `main`) and need
+to update all phases that stack on top of it.
 
-**Steps**:
+> **If any branch in the stack has an open PR or has been pushed, use the
+> [`rebase-stacked-prs`](../rebase-stacked-prs/SKILL.md) skill instead.** It
+> propagates via **merge commits** (no force-push) and also handles the case
+> where an earlier phase was squash-merged into `main`. A literal `git rebase`
+> rewrites SHAs and would require force-pushing every branch — which is denied
+> in this workspace.
 
-1. Identify the changed phase (N) and all downstream phases from the plan's `depends_on` chain.
+For **local-only, not-yet-pushed** stacks, propagate with merges (still no
+rebase, so the flow is identical to the pushed case):
 
-2. For each downstream phase in order (N+1, N+2, ...):
+1. Identify the changed phase (N) and all downstream phases from the plan's
+   `depends_on` chain.
+
+2. For each downstream phase in order (N+1, N+2, ...), merge the parent in:
    ```bash
    git checkout {user}/{ticket}/phase-{M}
-   git rebase {user}/{ticket}/phase-{M-1}
+   git merge --no-edit {user}/{ticket}/phase-{M-1}
    ```
 
-3. If a rebase has conflicts:
+3. If a merge has conflicts:
    - Stop and report the conflicting files.
    - Do **not** force-resolve. Tell the user which phase and files conflict.
-   - Run `git rebase --abort` to leave the branch in a clean state.
+   - Run `git merge --abort` to leave the branch in a clean state.
 
-4. After all rebases succeed, check out the branch the user was on before the operation.
+4. After all merges succeed, check out the branch the user was on before the
+   operation.
 
 ### 4. Switch to a phase branch
 
