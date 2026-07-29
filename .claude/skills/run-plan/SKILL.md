@@ -4,9 +4,9 @@ description: >-
   Drive a phased implementation plan to completion from the main conversation.
   Reads a {TICKET}-PLAN.md, assesses which phases are done by checking branch
   and PR status, then launches the plan-workflow.js Workflow script (multi-phase)
-  or a direct agent pipeline (single phase) to implement, review-gate, open
-  draft PRs, and run the AI review cycle — then drives the whole stack to a
-  3-sided approve via the review-stack-3-sided skill. Use when the user says
+  or a direct agent pipeline (single phase) to implement, review-gate, open a
+  draft PR, and run the AI review cycle plus the 3-sided review loop per phase —
+  each phase starting its reviews as soon as its own PR opens. Use when the user says
   "run the plan",
   "orchestrate the plan", "continue the plan", "implement all phases", "do
   phase N", or wants autonomous multi-phase execution.
@@ -95,15 +95,18 @@ Workflow:
       rohan_python_api: rohan-python-api
       onering: ONERING
     maxFixRounds: 2
+    maxThreeSidedRounds: 3     # per-PR 3-sided review→fix rounds
     skipAiReview: false        # true only if the user opted out of the bot cycle
+    skipThreeSided: false      # true only if the user wants the stack pass done later
     phases: [ {parsed phase objects, each with its assessed status} ]
 ```
 
 The workflow takes each phase from not-started to an **open draft PR that has
-been through the bot (CodeRabbit/Copilot) cycle**. The 3-sided review is *not*
-run inside the workflow — it runs as a stack-aware pass afterward (Step 4), so
-that upper layers are reviewed only after their lower layers' fixes have merged
-up.
+been through the bot (CodeRabbit/Copilot) cycle and the 3-sided review loop**.
+Both reviews start **as soon as that phase's PR opens** — they do not wait for
+the rest of the stack, and they overlap with later phases implementing. The
+bottom-up property still holds because a dependent's PR step merges up every
+commit its dependencies' review chains pushed before opening (see Cycle joins).
 
 The script handles, deterministically in code (not model judgment):
 
@@ -113,44 +116,60 @@ The script handles, deterministically in code (not model judgment):
   told to create a nested-repo worktree (see Worktrees below).
 - **File-overlap guard** — a phase whose `files` overlap a dependency's is
   held until that dependency's AI review cycle finishes.
-- **Review gate** — plan-compliance + security reviewers in parallel with
-  schema-validated verdicts; a fix loop (max `maxFixRounds`) where re-review
-  rounds carry the original findings forward so reviewers verify their own
-  findings were resolved.
-- **Bot review cycle** — after each PR opens (as draft), the bot cycle
-  (pr-ai-review-cycle: CodeRabbit + Copilot) runs without blocking the next
-  wave. The PR stays draft throughout. (The 3-sided review is a separate
-  stack pass in Step 4 — not run here.)
-- **Cycle joins** — before a phase's PR opens, dependency bot cycles are
-  awaited and any commits they pushed are propagated to the stacked branch
-  **via merge commits — never rebase, never force-push** (force-push is
-  denied in this workspace).
+- **Contract-compliance gate** — `plan-compliance-reviewer` with a
+  schema-validated verdict; a fix loop (max `maxFixRounds`) where re-review
+  rounds carry the original findings forward so the reviewer verifies its own
+  findings were resolved. **Security is deliberately not gated here** — the
+  3-sided pass's `pr-security-reviewer` covers the same threat taxonomy plus
+  robustness and testability, minutes later on the same code. Compliance stays
+  pre-PR because contract drift is much more expensive to fix once the branch
+  is pushed and dependents have stacked on it.
+- **Post-PR review chain, per phase** — as soon as a phase's PR opens (as
+  draft), that phase's chain starts and runs without blocking the next wave:
+  the bot cycle (pr-ai-review-cycle: CodeRabbit + Copilot), then the **3-sided
+  review→fix loop** (`/review-pr-3-sided`; if the verdict isn't `approve`, a
+  **different** agent runs `/pr-review` on the findings; repeat up to
+  `maxThreeSidedRounds`, findings carried forward so the re-review verifies its
+  own findings). The PR stays draft throughout.
+- **Cycle joins** — before a phase's PR opens, its dependencies' review chains
+  are awaited and every commit they pushed (bot fixes *and* 3-sided fixes) is
+  propagated to the stacked branch **via merge commits — never rebase, never
+  force-push** (force-push is denied in this workspace).
 
 The workflow runs in the background and you are notified on completion —
 do not poll. While it runs, relay notable progress to the user. When it
 returns, **proceed straight to Step 4** (do not stop for confirmation —
 default is hands-off to completion).
 
-## Step 4 — 3-sided the whole stack to approval
+## Step 4 — mop up the layers 3-sided didn't approve
 
-Once the workflow returns (all draft PRs open, bot-cycled), drive every layer
-to a 3-sided **approve** by invoking the **`review-stack-3-sided`** skill from
-the main conversation. That skill owns the per-layer loop
-(`/review-pr-3-sided` → if not approved, a *different* subagent runs
-`/pr-review` → repeat) and the bottom-up merge-up propagation of each approved
-layer into the layers stacked on it (merge commits, never rebase/force-push).
+The 3-sided loop already ran per phase inside the workflow. The workflow's
+return value has `three_sided_unapproved` — the layers that hit
+`maxThreeSidedRounds` without an `approve`. **If it is empty, skip to
+reporting.**
+
+Otherwise, drive only those layers to approval by invoking the
+**`review-stack-3-sided`** skill from the main conversation. That skill owns the
+per-layer loop (`/review-pr-3-sided` → if not approved, a *different* subagent
+runs `/pr-review` → repeat) and the bottom-up merge-up propagation of each
+approved layer into the layers stacked on it (merge commits, never
+rebase/force-push) — which matters here because a mopped-up layer's new fixes
+must reach the already-approved layers above it.
 
 Invoke it with:
 
-- **The PRs** — the draft PRs the workflow just opened, grouped into per-repo
-  stacks and ordered bottom-up by `depends_on` / `base_branch` (you already
-  have this from Step 1's phase list and the workflow's returned PR numbers).
+- **The PRs** — only the unapproved layers' PRs, grouped into per-repo stacks and
+  ordered bottom-up by `depends_on` / `base_branch`, plus the approved layers
+  stacked above them as merge-up targets. Say which layers already approved so it
+  doesn't re-review them.
 - **Round cap** — default 3 (the round cap the user set, if any).
+- **Outstanding findings** — the `blocking` list the workflow returned per
+  unapproved layer, so its reviewer resumes rather than starting cold.
 - **Grounding docs** — point its reviewers/fixers at `{TICKET}-PLAN.md` and
   `{TICKET}-contracts.md`; name any superseded/stale copies explicitly so a
   reviewer doesn't raise false blockers against an old contract.
 
-Do not re-run the 3-sided loop yourself — hand it to that skill so there's one
+Do not hand-roll the loop yourself — hand it to that skill so there's one
 implementation of the stack logic. When it finishes, report per-phase results
 in plain prose: PR URLs, review summaries, bot-cycle rounds, the final 3-sided
 verdict and rounds run per layer (PRs that reached `approve` are ready for the
@@ -163,17 +182,17 @@ A one-phase run doesn't need the workflow. Drive it from the main loop:
 
 1. **Implement** — spawn an agent on the implement-phase skill for phase N
    (same prompt shape as `implementPrompt` in plan-workflow.js).
-2. **Review gate** — spawn `plan-compliance-reviewer` and `security-reviewer`
-   agents **in the same message** (parallel), each asked for an explicit
-   PASS/FAIL verdict plus findings.
-3. **Fix loop** — if there are blocking findings (any compliance FAIL
-   finding; security CRITICAL/HIGH), spawn a fixer agent with the findings.
-   Then **SendMessage the original reviewer agents** — not fresh ones — with
-   the fixer's report: "verify each of your findings is resolved in the
-   updated diff." The reviewer keeps its context, so it checks what it
+2. **Contract-compliance gate** — spawn a `plan-compliance-reviewer` agent for
+   an explicit PASS/FAIL verdict plus findings. Do **not** also spawn
+   `security-reviewer` — step 6's 3-sided pass owns security (same reasoning as
+   the multi-phase gate above).
+3. **Fix loop** — if the compliance verdict is FAIL, spawn a fixer agent with
+   the findings. Then **SendMessage the original reviewer agent** — not a fresh
+   one — with the fixer's report: "verify each of your findings is resolved in
+   the updated diff." The reviewer keeps its context, so it checks what it
    actually meant. Max 2 rounds; if still blocked, stop and report.
 4. **Create PR** — spawn an agent on the create-pr skill (skip its review
-   gate; include the review summaries). Draft, always.
+   gate; include the compliance summary). Draft, always.
 5. **AI review cycle** — spawn a background agent (`run_in_background: true`)
    on the pr-ai-review-cycle skill. The harness notifies you when it
    completes — do not poll or sleep while waiting.

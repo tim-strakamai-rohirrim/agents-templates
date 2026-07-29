@@ -1,11 +1,12 @@
 export const meta = {
   name: 'run-plan-phases',
-  description: 'Drive a phased PLAN.md to draft PRs: implement, review gate, draft PR, and AI (bot) review cycle per phase. The 3-sided stack review runs afterward in the main loop via the review-stack-3-sided skill.',
+  description: 'Drive a phased PLAN.md to approved draft PRs: implement, review gate, draft PR, AI (bot) review cycle, then the 3-sided review→fix loop — all per phase, starting as soon as that phase\'s PR opens.',
   phases: [
     { title: 'Implement', detail: 'one implementer agent per ready phase' },
-    { title: 'Review', detail: 'plan-compliance + security reviewers with fix loop' },
+    { title: 'Review', detail: 'plan-compliance reviewer with fix loop' },
     { title: 'PR', detail: 'draft PR, dep-cycle join, merge propagation (no force-push)' },
     { title: 'AI Review', detail: 'CodeRabbit + Copilot cycle, PR stays draft' },
+    { title: '3-Sided', detail: 'per-PR 3-sided review → /pr-review fix loop until approve' },
   ],
 }
 
@@ -22,7 +23,9 @@ export const meta = {
 //     onering: 'ONERING',
 //   },
 //   maxFixRounds: 2,
+//   maxThreeSidedRounds: 3,              // per-PR 3-sided review→fix rounds before giving up
 //   skipAiReview: false,
+//   skipThreeSided: false,               // true only if the user wants the stack pass done later
 //   phases: [{ phase, title, repo, base_branch, depends_on: [], files: [], contracts: [],
 //              verification: [], status: 'merged'|'pr-open'|'branch-exists'|'not-started' }],
 // }
@@ -33,6 +36,7 @@ export const meta = {
 const _A = typeof args === 'string' ? JSON.parse(args) : (args || {})
 const { ticket, gitUser, workspaceRoot, baseBranch, repoPaths } = _A
 const maxFixRounds = _A.maxFixRounds || 2
+const maxThreeSidedRounds = _A.maxThreeSidedRounds || 3
 const allPhases = _A.phases
 
 const branchOf = (n) => `${gitUser}/${ticket}/phase-${n}`
@@ -124,6 +128,29 @@ const CYCLE_REPORT = {
   required: ['rounds', 'pushed_commits', 'still_draft'],
 }
 
+const THREE_SIDED_VERDICT = {
+  type: 'object',
+  properties: {
+    verdict: { enum: ['approve', 'changes-requested'] },
+    blocking: { type: 'array', items: { type: 'string' }, description: 'One line per blocking finding' },
+    still_draft: { type: 'boolean' },
+    summary: { type: 'string' },
+  },
+  required: ['verdict', 'summary'],
+}
+
+const FIX_REPORT = {
+  type: 'object',
+  properties: {
+    pushed_commits: { type: 'array', items: { type: 'string' } },
+    fixed: { type: 'array', items: { type: 'string' } },
+    pushed_back: { type: 'array', items: { type: 'string' } },
+    still_draft: { type: 'boolean' },
+    summary: { type: 'string' },
+  },
+  required: ['pushed_commits', 'summary'],
+}
+
 // ---------------------------------------------------------------------------
 // Prompts
 // ---------------------------------------------------------------------------
@@ -191,13 +218,13 @@ ${reviewContext(p)}
 Check the diff against the phase's step checklist and the contract specifications — exact DTOs, field names, error strings, endpoint shapes, status codes. Verdict FAIL if any acceptance criterion or contract is violated; report each violation as a finding (contract violations are HIGH).${rereviewNote(priorFindings, fixSummary)}`
 }
 
-function securityPrompt(p, priorFindings, fixSummary) {
-  return `Security-review phase ${p.phase} of ticket ${ticket} (${p.repo} repository).
-
-${reviewContext(p)}
-
-Analyze the diff for vulnerabilities: injection, auth/RBAC bypasses, secret leakage, unsafe deserialization, SSRF, path traversal. Verdict FAIL only if CRITICAL or HIGH findings exist; report MEDIUM/LOW as findings with a PASS verdict.${rereviewNote(priorFindings, fixSummary)}`
-}
+// Security is deliberately NOT reviewed here. The 3-sided pass's
+// pr-security-reviewer covers the same threat taxonomy (injection, auth/RBAC
+// bypass, IDOR + tenant isolation, secrets, unsafe deserialization, SSRF,
+// XSS/CSRF, dependency CVEs) plus robustness and testability lanes, minutes
+// later on the same code — running security-reviewer here too paid twice for
+// one lens. Contract compliance stays because catching drift after the branch
+// is pushed is genuinely more expensive.
 
 function fixPrompt(p, findings, implReport) {
   return `Fix review findings on phase ${p.phase} of ticket ${ticket}.
@@ -206,7 +233,7 @@ function fixPrompt(p, findings, implReport) {
 - Branch: ${branchOf(p.phase)} (check it out if not already)
 - Contracts: ${workspaceRoot}/${ticket}-contracts.md
 
-Findings to fix (from plan-compliance and security reviewers):
+Findings to fix (from the plan-compliance reviewer):
 ${JSON.stringify(findings, null, 2)}
 
 Fix every finding, re-run this phase's verification commands until green (${(p.verification || []).join(' && ') || 'repo lint + tests'}), and commit. Do not push. Report what you changed per finding.
@@ -228,9 +255,9 @@ Dependency updates: ${JSON.stringify(depMerges)}`
     : ''
   return `Create a GitHub pull request for phase ${p.phase} of ticket ${ticket}.
 
-Read .claude/skills/create-pr/SKILL.md (relative to ${workspaceRoot}) and follow its workflow. SKIP its review gate — reviews already ran; include these results in the PR body instead:
+Read .claude/skills/create-pr/SKILL.md (relative to ${workspaceRoot}) and follow its workflow. SKIP its review gate — the plan-compliance review already ran, and security is covered by the 3-sided review that runs on this PR right after it opens. Include this in the PR body instead of re-reviewing:
 - Plan compliance: ${reviews.compliance ? reviews.compliance.summary : 'not run'}
-- Security: ${reviews.security ? reviews.security.summary : 'not run'}
+- Security: reviewed by the 3-sided pass on this PR (pr-security-reviewer), not pre-PR.
 
 Context:
 - Plan: ${workspaceRoot}/${ticket}-PLAN.md, contracts: ${workspaceRoot}/${ticket}-contracts.md
@@ -266,23 +293,120 @@ Scope guard — only touch files in this phase's list: ${JSON.stringify(p.files)
 The PR is and must remain a DRAFT for the entire cycle. Report rounds run, comments fixed/pushed back, every commit SHA you pushed, and the final draft state.`
 }
 
-// Per-PR bot review cycle (CodeRabbit/Copilot). Runs concurrently with later
-// waves; its pushed_commits feed stacked-branch merge propagation at the
-// dependents' PR-creation step. The 3-sided review is NOT done here — it runs
-// stack-aware and bottom-up AFTER the workflow, via the review-stack-3-sided
-// skill invoked from the run-plan main loop (see run-plan SKILL.md).
+function threeSidedReviewPrompt(p, pr, round, priorBlocking) {
+  const followUp = priorBlocking
+    ? `
+
+This is review round ${round}. A previous round raised the blocking findings below and a DIFFERENT fix agent has since pushed commits. Re-review the CURRENT diff: for each finding, verify it is actually resolved (do not take the fix report's word for it), and flag any regression the fix introduced. Do not re-litigate findings you already accepted.
+
+Previous blocking findings:
+${JSON.stringify(priorBlocking, null, 2)}`
+    : ''
+  return `Run a 3-sided code review of PR #${pr.pr_number} (${ticket} phase ${p.phase}).
+
+Invoke the \`/review-pr-3-sided\` skill on this PR and follow its complete workflow.
+
+Inputs:
+- PR: #${pr.pr_number} — ${pr.pr_url} (derive the {owner}/{repo} slug from this)
+- Repo path: ${repoPathOf(p)}
+- Grounding docs — the authoritative spec for this phase: ${workspaceRoot}/${ticket}-PLAN.md (phase ${p.phase} section) and ${workspaceRoot}/${ticket}-contracts.md. If you find other copies of these docs (e.g. under archive/ or specs/), treat them as stale and do NOT ground findings on them.
+- Scope: this phase's files only — ${JSON.stringify(p.files)}. Findings that belong to another phase in this stack are out-of-scope; note them, don't block on them.
+
+COMPLETE THE REVIEW IN THIS TURN. The skill dispatches intent/disagreeable/security lens reviewers — wait for them SYNCHRONOUSLY (\`run_in_background: false\`) and do not yield or wait on a notification before you have the aggregated verdict.
+
+Gate on the verdict YOU report, not on the GitHub review event (self-authored PRs cannot self-approve, so the skill posts the verdict as a comment). Map anything non-approving to \`changes-requested\`.
+
+The PR is and must remain a DRAFT — never flip it to ready.${followUp}
+
+Your report is consumed programmatically by an orchestration script, not read by a human.`
+}
+
+function threeSidedFixPrompt(p, pr, blocking) {
+  const env = p.repo === 'rohan_api'
+    ? ` For rohan_api, copy .env/.env.test/scripts/add_user_local.sql from the primary per .claude/skills/copy-rohan-api-worktree-files/SKILL.md.`
+    : ''
+  return `Address the 3-sided review findings on PR #${pr.pr_number} (${ticket} phase ${p.phase}).
+
+Invoke the \`/pr-review\` skill and follow its workflow: triage every finding — fix the valid ones, reply on the PR pushing back on wrong or out-of-scope ones, skip nits.
+
+Inputs:
+- PR: #${pr.pr_number} — ${pr.pr_url}
+- Repo: ${repoPathOf(p)}
+- Branch: ${branchOf(p.phase)}
+- Contracts: ${workspaceRoot}/${ticket}-contracts.md (authoritative — ignore stale copies under archive/ or specs/)
+- Verification: ${(p.verification || []).join(' && ') || 'repo lint + tests'}
+
+Blocking findings from the 3-sided review:
+${JSON.stringify(blocking, null, 2)}
+
+Working-tree isolation — later phases are implementing in ${repoPathOf(p)} concurrently. Never switch branches in the primary checkout. Work in a dedicated worktree:
+
+  cd ${repoPathOf(p)}
+  git worktree add ../${repoNameOf(p)}-${ticket}-phase-${p.phase}-3sided ${branchOf(p.phase)}
+${env}
+Remove the worktree once you have pushed (\`git worktree remove --force <path>\`).
+
+Do the work yourself — do NOT spawn further subagents. Only touch this phase's files (${JSON.stringify(p.files)}); anything else is another phase's territory. Run verification until green, commit, and push. Never force-push (denied in this workspace) — append commits only. Leave the PR a DRAFT.
+
+Report every commit SHA you pushed. Your report is consumed programmatically.`
+}
+
+// Per-PR post-PR review chain: the bot cycle (CodeRabbit/Copilot), then the
+// 3-sided review→fix loop, driven to an `approve` verdict. This runs as soon as
+// THIS phase's PR opens — concurrently with later phases — rather than waiting
+// for the whole stack. Reviewer and fixer are always separate agents (the fixer
+// never grades its own work); findings are carried forward into each re-review
+// so the reviewer verifies its own findings were resolved.
+//
+// Every commit pushed here (bot fixes + 3-sided fixes) lands in pushed_commits,
+// which the dependents' PR step merges up into their stacked branches — that
+// merge-up is what preserves the bottom-up property the old stack pass gave us.
 async function postPrReviews(p, pr) {
   const label = `phase-${p.phase}`
-  if (_A.skipAiReview) {
-    return { pushed_commits: [], still_draft: true, bot_cycle: null }
+  const pushed = []
+
+  let bot = null
+  if (!_A.skipAiReview) {
+    bot = await agent(cyclePrompt(p, pr), {
+      label: `ai-cycle:${label}`, phase: 'AI Review', schema: CYCLE_REPORT,
+    })
+    if (bot) pushed.push(...(bot.pushed_commits || []))
   }
-  const bot = await agent(cyclePrompt(p, pr), {
-    label: `ai-cycle:${label}`, phase: 'AI Review', schema: CYCLE_REPORT,
-  })
+
+  let threeSided = null
+  if (!_A.skipThreeSided) {
+    let priorBlocking = null
+    for (let round = 1; round <= maxThreeSidedRounds; round++) {
+      threeSided = await agent(threeSidedReviewPrompt(p, pr, round, priorBlocking), {
+        label: `3sided:${label}:r${round}`, phase: '3-Sided', schema: THREE_SIDED_VERDICT,
+      })
+      if (!threeSided) break
+      if (threeSided.verdict === 'approve') {
+        log(`Phase ${p.phase} PR #${pr.pr_number}: 3-sided APPROVE (round ${round})`)
+        break
+      }
+      const blocking = threeSided.blocking || []
+      if (round === maxThreeSidedRounds) {
+        log(`Phase ${p.phase} PR #${pr.pr_number}: 3-sided still changes-requested after ${round} round(s) — ${blocking.length} finding(s) left for the human`)
+        break
+      }
+      log(`Phase ${p.phase} PR #${pr.pr_number}: 3-sided changes-requested — fix round ${round}/${maxThreeSidedRounds - 1}`)
+      const fix = await agent(threeSidedFixPrompt(p, pr, blocking), {
+        label: `3sided-fix:${label}:r${round}`, phase: '3-Sided', schema: FIX_REPORT,
+      })
+      if (fix) pushed.push(...(fix.pushed_commits || []))
+      priorBlocking = blocking
+    }
+  }
+
+  const stillDraft = threeSided && typeof threeSided.still_draft === 'boolean'
+    ? threeSided.still_draft
+    : bot ? bot.still_draft : true
   return {
-    pushed_commits: bot ? bot.pushed_commits || [] : [],
-    still_draft: bot ? bot.still_draft : true,
+    pushed_commits: pushed,
+    still_draft: stillDraft,
     bot_cycle: bot,
+    three_sided: threeSided,
   }
 }
 
@@ -291,19 +415,13 @@ async function postPrReviews(p, pr) {
 // ---------------------------------------------------------------------------
 
 function blockingFindings(reviews) {
-  const out = []
-  if (reviews.compliance && reviews.compliance.verdict === 'FAIL') {
-    out.push(...reviews.compliance.findings.map((f) => ({ source: 'plan-compliance', ...f })))
-  }
-  if (reviews.security) {
-    out.push(...reviews.security.findings
-      .filter((f) => f.severity === 'CRITICAL' || f.severity === 'HIGH')
-      .map((f) => ({ source: 'security', ...f })))
-  }
-  return out
+  if (!reviews.compliance || reviews.compliance.verdict !== 'FAIL') return []
+  return reviews.compliance.findings.map((f) => ({ source: 'plan-compliance', ...f }))
 }
 
-const cycleJoin = {} // phase number -> in-flight promise of the postPrReviews chain (never awaited at spawn)
+// phase number -> in-flight promise of the postPrReviews chain (bot cycle +
+// 3-sided loop), never awaited at spawn.
+const cycleJoin = {}
 
 async function runPhase(p, useWorktree) {
   const label = `phase-${p.phase}`
@@ -333,25 +451,20 @@ async function runPhase(p, useWorktree) {
     }
   }
 
-  // 2. Review gate with fix loop. Re-review rounds carry the original findings
-  //    forward so reviewers verify their own findings are resolved (the
-  //    workflow-context equivalent of continuing the reviewer via SendMessage).
+  // 2. Contract-compliance gate with fix loop. Re-review rounds carry the
+  //    original findings forward so the reviewer verifies its own findings are
+  //    resolved (the workflow-context equivalent of continuing it via
+  //    SendMessage). Security is not gated here — see the note above fixPrompt.
   let reviews = {}
   let priorFindings = null
   let fixSummary = null
   let blocking = []
   for (let round = 0; round <= maxFixRounds; round++) {
-    const [compliance, security] = await parallel([
-      () => agent(compliancePrompt(p, priorFindings, fixSummary), {
-        label: `review:plan:${label}`, phase: 'Review', schema: REVIEW_VERDICT,
-        agentType: 'plan-compliance-reviewer',
-      }),
-      () => agent(securityPrompt(p, priorFindings, fixSummary), {
-        label: `review:security:${label}`, phase: 'Review', schema: REVIEW_VERDICT,
-        agentType: 'security-reviewer',
-      }),
-    ])
-    reviews = { compliance, security }
+    const compliance = await agent(compliancePrompt(p, priorFindings, fixSummary), {
+      label: `review:plan:${label}`, phase: 'Review', schema: REVIEW_VERDICT,
+      agentType: 'plan-compliance-reviewer',
+    })
+    reviews = { compliance }
     blocking = blockingFindings(reviews)
     if (!blocking.length || round === maxFixRounds) break
     log(`Phase ${p.phase}: ${blocking.length} blocking finding(s) — fix round ${round + 1}/${maxFixRounds}`)
@@ -383,17 +496,18 @@ async function runPhase(p, useWorktree) {
     return { phase: p.phase, title: p.title, status: 'pr-failed', reviews }
   }
 
-  // 5. Kick off the per-PR bot review cycle WITHOUT awaiting — it overlaps
-  //    with the next wave's implementation. Joined at step 3 of dependents and
-  //    at the end of the run; its pushed_commits drive stacked-branch merge
-  //    propagation. The 3-sided stack review happens after the whole workflow.
-  if (!_A.skipAiReview) {
+  // 5. Kick off the per-PR post-PR review chain (bot cycle, then the 3-sided
+  //    review→fix loop) WITHOUT awaiting — it overlaps with the next wave's
+  //    implementation. Joined at step 3 of dependents and at the end of the
+  //    run; its pushed_commits drive stacked-branch merge propagation.
+  if (!_A.skipAiReview || !_A.skipThreeSided) {
     cycleJoin[p.phase] = postPrReviews(p, pr)
   }
 
-  const mediumNotes = (reviews.security ? reviews.security.findings : [])
-    .filter((f) => f.severity === 'MEDIUM' || f.severity === 'LOW')
-  return { phase: p.phase, title: p.title, status: 'pr-created', pr, non_blocking_findings: mediumNotes }
+  // Compliance findings that came back with a PASS verdict — advisory, worth
+  // surfacing in the final report but never blocking.
+  const advisory = reviews.compliance ? reviews.compliance.findings : []
+  return { phase: p.phase, title: p.title, status: 'pr-created', pr, non_blocking_findings: advisory }
 }
 
 // ---------------------------------------------------------------------------
@@ -431,15 +545,25 @@ while (pending.length) {
   pending = pending.filter((p) => !processed.has(p.phase))
 }
 
-// Final join — wait for every still-running bot review cycle so the run ends
-// with all PRs opened, bot-cycled, and still in draft. The 3-sided stack
-// review runs next, in the main loop, via the review-stack-3-sided skill.
+// Final join — wait for every still-running post-PR chain so the run ends with
+// all PRs opened, bot-cycled, 3-sided-reviewed, and still in draft. Layers that
+// never reached `approve` are reported so the main loop can hand just those to
+// the review-stack-3-sided skill.
 const cycles = {}
+const unapproved = []
 for (const num of Object.keys(cycleJoin)) {
   cycles[num] = await cycleJoin[num]
-  if (cycles[num] && cycles[num].still_draft === false) {
+  if (!cycles[num]) continue
+  if (cycles[num].still_draft === false) {
     log(`WARNING: phase ${num} PR is no longer draft — someone flipped it mid-cycle`)
   }
+  const ts = cycles[num].three_sided
+  if (!_A.skipThreeSided && (!ts || ts.verdict !== 'approve')) {
+    unapproved.push({ phase: Number(num), blocking: ts ? ts.blocking || [] : [], summary: ts ? ts.summary : 'no verdict reported' })
+  }
+}
+if (unapproved.length) {
+  log(`3-sided did NOT approve phase(s) ${unapproved.map((u) => u.phase).join(', ')} — hand these to review-stack-3-sided`)
 }
 
-return { ticket, phases: results, post_pr_reviews: cycles }
+return { ticket, phases: results, post_pr_reviews: cycles, three_sided_unapproved: unapproved }
