@@ -124,6 +124,19 @@ The script handles, deterministically in code (not model judgment):
   robustness and testability, minutes later on the same code. Compliance stays
   pre-PR because contract drift is much more expensive to fix once the branch
   is pushed and dependents have stacked on it.
+- **Visual evidence, per UI phase** — a phase whose files touch the frontend
+  (`rohan_ui`, or any `*.html` / `*.scss` / `*.component.ts`) gets its affected
+  screens captured from the branch's final state and attached to the PR:
+  a screenshot per relevant state (empty, loading, error, populated), a GIF of
+  the key interaction end to end, and before/after where behavior changed. It
+  runs as soon as the PR opens, and **re-runs after the review chain if any
+  fix commit touched the frontend** — attached evidence must match the branch's
+  final state. Owned by the `capture-ui-evidence` skill, which serves the
+  phase's **worktree** on its own port (never checking out in the shared primary
+  checkout) and hands the existing localhost OIDC session over to that origin.
+  Captures are serialized on a browser lock — they share one real Chrome.
+  **Best-effort**: a skip (worktree won't build, no session to hand over) is
+  reported and never blocks the PR. It never pushes code.
 - **Post-PR review chain, per phase** — as soon as a phase's PR opens (as
   draft), that phase's chain starts and runs without blocking the next wave:
   the bot cycle (pr-ai-review-cycle: CodeRabbit + Copilot), then the **3-sided
@@ -173,8 +186,10 @@ Do not hand-roll the loop yourself — hand it to that skill so there's one
 implementation of the stack logic. When it finishes, report per-phase results
 in plain prose: PR URLs, review summaries, bot-cycle rounds, the final 3-sided
 verdict and rounds run per layer (PRs that reached `approve` are ready for the
-human pass; for the rest, list the outstanding findings), merge-up SHAs, and
-anything blocked. PRs stay draft the entire time.
+human pass; for the rest, list the outstanding findings), merge-up SHAs,
+visual evidence per UI phase (attached, or the workflow's `evidence_skipped`
+reason — never let a skip go unmentioned), and anything blocked. PRs stay draft
+the entire time.
 
 ### Single phase ("do phase 3") → direct agents with SendMessage
 
@@ -193,15 +208,24 @@ A one-phase run doesn't need the workflow. Drive it from the main loop:
    actually meant. Max 2 rounds; if still blocked, stop and report.
 4. **Create PR** — spawn an agent on the create-pr skill (skip its review
    gate; include the compliance summary). Draft, always.
-5. **AI review cycle** — spawn a background agent (`run_in_background: true`)
+5. **Visual evidence (frontend phases only)** — if the phase touched the
+   frontend, spawn an agent on the `capture-ui-evidence` skill for this PR
+   before the review cycle (it drives the one real browser, so don't run it
+   concurrently with anything else that needs Chrome). Best-effort: relay
+   whether it captured or skipped, and why.
+6. **AI review cycle** — spawn a background agent (`run_in_background: true`)
    on the pr-ai-review-cycle skill. The harness notifies you when it
    completes — do not poll or sleep while waiting.
-6. **3-sided to approval** — after the bot cycle completes, invoke the
+7. **3-sided to approval** — after the bot cycle completes, invoke the
    **`review-stack-3-sided`** skill on this single PR (a one-layer stack).
    It runs the `/review-pr-3-sided` → `/pr-review` loop to an `approve`
    verdict. Same skill, same one implementation of the loop as the
    multi-phase path — don't hand-roll it here. When it approves, tell the
    user the PR is ready for their human pass. PR stays draft.
+8. **Re-capture evidence** — if step 5 captured and any review fix commit
+   touched frontend files, re-run `capture-ui-evidence` last, so the attached
+   evidence matches the branch's final state (it edits the existing evidence
+   comment in place rather than posting a second one).
 
 ## Worktrees (nested repos)
 

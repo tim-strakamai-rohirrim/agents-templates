@@ -5,6 +5,7 @@ export const meta = {
     { title: 'Implement', detail: 'one implementer agent per ready phase' },
     { title: 'Review', detail: 'plan-compliance reviewer with fix loop' },
     { title: 'PR', detail: 'draft PR, dep-cycle join, merge propagation (no force-push)' },
+    { title: 'Evidence', detail: 'UI phases only: state screenshots + interaction GIF attached to the PR' },
     { title: 'AI Review', detail: 'CodeRabbit + Copilot cycle, PR stays draft' },
     { title: '3-Sided', detail: 'per-PR 3-sided review → /pr-review fix loop until approve' },
   ],
@@ -54,6 +55,22 @@ const baseRefOf = (p) =>
       : p.base_branch
 const repoPathOf = (p) => `${workspaceRoot}/${repoPaths[p.repo]}`
 const repoNameOf = (p) => repoPaths[p.repo].split('/').pop()
+// Frontend work → the PR gets visual evidence (see capture-ui-evidence skill).
+const hasUi = (p) =>
+  p.repo === 'rohan_ui' ||
+  (p.files || []).some((f) => /\.(html|scss|css)$|\.component\.ts$|(^|\/)src\/app\//.test(f))
+
+// Evidence capture drives the one real browser (tabs, clicks, an OIDC session
+// hand-off), so two phases capturing at once would fight over it. Single global
+// lock: a capture that waits also delays its own phase's bot cycle, which is
+// fine at a handful of UI phases taking minutes each. Per-browser-profile locks
+// if that ever stops being true.
+let browserLock = Promise.resolve()
+function withBrowser(fn) {
+  const run = browserLock.then(fn, fn)
+  browserLock = run.then(() => {}, () => {})
+  return run
+}
 
 // ---------------------------------------------------------------------------
 // Structured-output schemas — sub-agent reports are validated, never parsed
@@ -137,6 +154,20 @@ const THREE_SIDED_VERDICT = {
     summary: { type: 'string' },
   },
   required: ['verdict', 'summary'],
+}
+
+const EVIDENCE_REPORT = {
+  type: 'object',
+  properties: {
+    captured: { type: 'boolean' },
+    skipped_reason: { type: 'string', description: 'Empty when captured; otherwise the one-line reason' },
+    head_sha: { type: 'string', description: 'SHA the evidence reflects' },
+    states: { type: 'array', items: { type: 'string' }, description: 'e.g. ["populated","empty","loading","error"]' },
+    gif: { type: 'boolean' },
+    before_after: { type: 'boolean' },
+    comment_url: { type: 'string' },
+  },
+  required: ['captured'],
 }
 
 const FIX_REPORT = {
@@ -293,6 +324,30 @@ Scope guard — only touch files in this phase's list: ${JSON.stringify(p.files)
 The PR is and must remain a DRAFT for the entire cycle. Report rounds run, comments fixed/pushed back, every commit SHA you pushed, and the final draft state.`
 }
 
+function evidencePrompt(p, pr, priorEvidence) {
+  const recapture = priorEvidence && priorEvidence.captured
+    ? `
+
+This is a RE-CAPTURE: evidence was already attached for ${priorEvidence.head_sha || 'an earlier commit'} and review-cycle commits have since changed the frontend. Capture the branch's CURRENT final state and EDIT the existing evidence comment (${priorEvidence.comment_url || 'find it on the PR'}) in place — do not post a second one.`
+    : ''
+  return `Capture and attach visual evidence for PR #${pr.pr_number} (${ticket} phase ${p.phase}).
+
+Read .claude/skills/capture-ui-evidence/SKILL.md (relative to ${workspaceRoot}) and follow its workflow.
+
+Inputs:
+- PR: #${pr.pr_number} — ${pr.pr_url}
+- Repo: ${repoPathOf(p)}
+- Branch: ${branchOf(p.phase)}, base: ${baseRefOf(p)}
+- Phase files: ${JSON.stringify(p.files)}
+- What this phase is for: ${p.title} — the GIF should show that flow end to end, not a tour of the app.
+
+Serving: NEVER git checkout in ${repoPathOf(p)} — other phases are working there concurrently. Serve this branch's own worktree on its own port per the skill's Step 2 (symlink node_modules from the primary; reuse whatever already serves the head SHA), and stop any server you start.
+
+This step is BEST-EFFORT and must never block the PR: if the worktree won't build, or neither origin has a session to hand over, skip and report the one-line reason. Do NOT bring up the backend stack or run migrations — stub responses in the browser instead. Do NOT push code. Leave the PR a DRAFT.${recapture}
+
+Your report is consumed programmatically by an orchestration script, not read by a human.`
+}
+
 function threeSidedReviewPrompt(p, pr, round, priorBlocking) {
   const followUp = priorBlocking
     ? `
@@ -365,6 +420,22 @@ async function postPrReviews(p, pr) {
   const label = `phase-${p.phase}`
   const pushed = []
 
+  // Visual evidence for UI phases — screenshots per state + an interaction GIF,
+  // attached to the PR so it can be reviewed by observation. Best-effort: a
+  // skip (no dev server, stale tree, no session) is reported, never fatal.
+  // Serialized ahead of the bot cycle because it drives the one real browser.
+  let evidence = null
+  if (hasUi(p)) {
+    evidence = await withBrowser(() => agent(evidencePrompt(p, pr, null), {
+      label: `evidence:${label}`, phase: 'Evidence', schema: EVIDENCE_REPORT,
+    }))
+    if (evidence) {
+      log(evidence.captured
+        ? `Phase ${p.phase} PR #${pr.pr_number}: evidence attached (${(evidence.states || []).join(', ') || 'states'}${evidence.gif ? ' + GIF' : ''})`
+        : `Phase ${p.phase} PR #${pr.pr_number}: evidence skipped — ${evidence.skipped_reason || 'no reason reported'}`)
+    }
+  }
+
   let bot = null
   if (!_A.skipAiReview) {
     bot = await agent(cyclePrompt(p, pr), {
@@ -399,6 +470,18 @@ async function postPrReviews(p, pr) {
     }
   }
 
+  // The review chain pushed code after the evidence was taken — the attached
+  // screenshots/GIF no longer show the branch's final state. Re-capture.
+  if (hasUi(p) && pushed.length) {
+    const recaptured = await withBrowser(() => agent(evidencePrompt(p, pr, evidence), {
+      label: `evidence:${label}:recapture`, phase: 'Evidence', schema: EVIDENCE_REPORT,
+    }))
+    if (recaptured) {
+      evidence = recaptured
+      log(`Phase ${p.phase} PR #${pr.pr_number}: evidence ${recaptured.captured ? 're-captured after review fixes' : `re-capture skipped — ${recaptured.skipped_reason || 'no reason reported'}`}`)
+    }
+  }
+
   const stillDraft = threeSided && typeof threeSided.still_draft === 'boolean'
     ? threeSided.still_draft
     : bot ? bot.still_draft : true
@@ -407,6 +490,7 @@ async function postPrReviews(p, pr) {
     still_draft: stillDraft,
     bot_cycle: bot,
     three_sided: threeSided,
+    evidence,
   }
 }
 
@@ -551,9 +635,14 @@ while (pending.length) {
 // the review-stack-3-sided skill.
 const cycles = {}
 const unapproved = []
+const evidenceSkipped = []
 for (const num of Object.keys(cycleJoin)) {
   cycles[num] = await cycleJoin[num]
   if (!cycles[num]) continue
+  const ev = cycles[num].evidence
+  if (ev && !ev.captured) {
+    evidenceSkipped.push({ phase: Number(num), reason: ev.skipped_reason || 'no reason reported' })
+  }
   if (cycles[num].still_draft === false) {
     log(`WARNING: phase ${num} PR is no longer draft — someone flipped it mid-cycle`)
   }
@@ -565,5 +654,14 @@ for (const num of Object.keys(cycleJoin)) {
 if (unapproved.length) {
   log(`3-sided did NOT approve phase(s) ${unapproved.map((u) => u.phase).join(', ')} — hand these to review-stack-3-sided`)
 }
+if (evidenceSkipped.length) {
+  log(`UI evidence NOT attached for phase(s) ${evidenceSkipped.map((e) => `${e.phase} (${e.reason})`).join('; ')}`)
+}
 
-return { ticket, phases: results, post_pr_reviews: cycles, three_sided_unapproved: unapproved }
+return {
+  ticket,
+  phases: results,
+  post_pr_reviews: cycles,
+  three_sided_unapproved: unapproved,
+  evidence_skipped: evidenceSkipped,
+}

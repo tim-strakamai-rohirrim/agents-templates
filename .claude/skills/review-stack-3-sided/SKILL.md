@@ -139,9 +139,20 @@ Run the repo's checks before pushing a merge or trusting a fix:
 - **Never modify plan/contracts docs** as part of this loop (unless the user asks
   separately).
 
+## Visual evidence after a layer approves
+
+If a layer's fix or merge-up commits touched frontend files (`*.html`, `*.scss`,
+`*.component.ts`, anything under `src/app/`), any visual evidence already
+attached to that PR is stale. Once the layer approves, re-run the
+`capture-ui-evidence` skill on it — it edits the existing evidence comment in
+place so the attached screenshots/GIF match the branch's final state. A PR with
+frontend changes and no evidence at all gets a first capture here. Best-effort:
+report a skip and its reason, never hold the layer for it.
+
 ## Reporting
 
 When all stacks are done, report per PR: rounds run, final verdict, fix commit
 SHAs, merge-up SHAs, findings fixed vs. pushed back, and any layer that hit the
 round cap without approving (with its outstanding findings). Note non-blocking
-items reviewers approved despite, and any deploy-ordering caveats surfaced.
+items reviewers approved despite, any deploy-ordering caveats surfaced, and
+whether visual evidence was (re-)captured or skipped per UI layer.
