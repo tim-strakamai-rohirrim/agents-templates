@@ -614,7 +614,9 @@ while (pending.length) {
 
   // Same-repo phases in one wave contend for the primary checkout: the first
   // gets it, the rest get dedicated nested-repo worktrees.
-  const repoSeen = {}
+  // Repos whose primary checkout is occupied by unrelated work start "seen", so
+  // every phase there gets its own worktree instead of yanking the checkout.
+  const repoSeen = Object.fromEntries((_A.forceWorktreeRepos || []).map((r) => [r, true]))
   const wave = await parallel(ready.map((p) => {
     const useWorktree = Boolean(repoSeen[p.repo])
     repoSeen[p.repo] = true

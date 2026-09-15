@@ -63,6 +63,9 @@ A complete plan-to-PR workflow. Use these in sequence for structured feature imp
 | Skill                | Trigger                               | What it does                                                                  |
 | -------------------- | ------------------------------------- | ----------------------------------------------------------------------------- |
 | `/planner-architect` | `plan`, `architect`, `create a plan`  | Produces `PLAN.md` + `contracts.md` with phased implementation metadata       |
+| `/plan-and-review`   | `plan this`, `plan and review`        | Runs the planner in a subagent, then `/review-plan` in a **different** one, then applies the review's edits |
+| `/review-plan`       | `review the plan`, `is this plan ready` | Mechanical validation + six judgment lenses over an existing plan; verdict READY/REVISE |
+| `/run-plan`          | `run the plan`, `implement all phases` | Drives every phase to a draft PR with review cycles                          |
 | `/implement-phase`   | `implement phase`, `do phase N`       | Picks up a phase from the plan, implements step-by-step, verifies, commits    |
 | `/stacked-branches`  | `create phase branch`, `stack status` | Manages `{user}/{ticket}/phase-{N}` branch stacks with rebase support         |
 | `/git-commit`        | `commit`, `save changes`              | Drafts a commit message from the diff and commits across multi-repo workspace |
