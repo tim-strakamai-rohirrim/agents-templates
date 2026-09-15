@@ -149,6 +149,12 @@ Use the Jira ticket section from the plan as the foundation. Structure the PR as
 **Plan compliance**: PASS (all acceptance criteria verified)
 **Security review**: PASS (no critical/high findings)
 {If medium/low findings exist, list them here}
+
+## Evidence
+
+{Frontend changes only: "Screenshots of each state and a GIF of the key
+interaction are attached in the visual evidence comment below." Omit this
+section entirely for backend-only PRs.}
 ```
 
 ### Step 6 — Create the PR
@@ -236,6 +242,17 @@ belongs to, in Title Case. Derive it in this order of preference:
    | Multiple features or unclear                             | Ask the user    |
 
 When in doubt, ask the user rather than guessing.
+
+### Step 6.5 — Visual evidence (frontend PRs)
+
+If the diff touches the frontend (`*.html`, `*.scss`, `*.component.ts`, or
+anything under `src/app/`), invoke the `capture-ui-evidence` skill on the new PR
+so the change can be reviewed by observation rather than by reading the diff.
+It is best-effort — report whether it captured or skipped, and why, but never
+hold the PR for it.
+
+> **Skip condition**: if the invoking orchestrator says it runs evidence capture
+> itself (run-plan's workflow does), skip this step.
 
 ### Step 7 — Report
 

@@ -299,6 +299,17 @@ trigger another bot pass. If the sub-agent made no changes (everything
 was a nit or push-back), set `LAST_PUSHED_COMMIT=""` and the 2b-guard
 above will break the next iteration immediately.
 
+### Step 2.5 — Re-capture visual evidence if the UI moved
+
+If any fix commit this cycle pushed touched frontend files (`*.html`, `*.scss`,
+`*.component.ts`, anything under `src/app/`) **and** the PR already has a visual
+evidence comment, the attached screenshots/GIF no longer show the branch's final
+state. Re-run the `capture-ui-evidence` skill for this PR — it edits the
+existing evidence comment in place. Best-effort: if it skips, report the reason.
+
+> **Skip condition**: if the invoking orchestrator says it handles re-capture
+> after the full review chain (run-plan's workflow does), skip this step.
+
 ### Step 3 — Verify PR is still draft
 
 The cycle never flipped the PR out of draft, so there is nothing to
